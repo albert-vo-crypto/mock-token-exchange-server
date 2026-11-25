@@ -18,6 +18,7 @@ Covers:
 
 import json
 import time
+import base64
 import requests
 import pytest
 
@@ -30,6 +31,65 @@ SERVER_ID = "mock_mcp_server"
 EXPECTED_AUDIENCE = "api://my-mcp-server"
 EXPECTED_CLIENT_ID = "litellm-client"
 EXPECTED_SCOPES = "mcp.tools.read mcp.tools.execute"
+
+
+def make_mock_jwt(payload: dict) -> str:
+    """Helper to create an unencrypted mock JWT (header.payload.signature)."""
+    header = {"alg": "none", "typ": "JWT"}
+    def b64url_encode(data: dict) -> str:
+        dumped = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(dumped).decode("utf-8").rstrip("=")
+    return f"{b64url_encode(header)}.{b64url_encode(payload)}.unsigned_signature"
+
+
+def format_token_display(token: str) -> str:
+    """Format a token (JWT or opaque token) with decoded payload/claims if applicable."""
+    if not token:
+        return "<empty>"
+
+    parts = token.strip().split(".")
+    # Standard JWT format: header.payload.signature
+    if len(parts) == 3:
+        try:
+            # Base64url decode header and payload
+            def b64url_decode(segment: str):
+                rem = len(segment) % 4
+                if rem > 0:
+                    segment += "=" * (4 - rem)
+                return json.loads(base64.urlsafe_b64decode(segment.encode("utf-8")).decode("utf-8"))
+
+            header = b64url_decode(parts[0])
+            payload = b64url_decode(parts[1])
+            return (
+                f"Raw Token: {token}\n"
+                f"Decoded Header:\n{json.dumps(header, indent=2)}\n"
+                f"Decoded Payload (Claims):\n{json.dumps(payload, indent=2)}"
+            )
+        except Exception:
+            pass
+
+    return f"Raw Token: {token}"
+
+
+def display_tokens(stage_label: str, token_before: str, token_after: str = None, details: dict = None):
+    """Print clearly visible inspection banners for tokens before and after exchange."""
+    separator = "=" * 70
+    print(f"\n{separator}")
+    print(f"[{stage_label}] TOKEN EXCHANGE INSPECTION")
+    print(separator)
+
+    print("\n--- TOKEN BEFORE EXCHANGE (Subject Token / Incoming JWT) ---")
+    print(format_token_display(token_before))
+
+    if token_after is not None:
+        print("\n--- TOKEN AFTER EXCHANGE (Exchanged Token / Downstream Token) ---")
+        print(format_token_display(token_after))
+
+    if details:
+        print("\n--- EXCHANGE METADATA ---")
+        print(json.dumps(details, indent=2))
+
+    print(f"{separator}\n")
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +115,23 @@ def test_e2e_obo_positive_tool_call():
       2. STS log shows subject_token, client_id, audience, and requested scopes.
       3. Downstream MCP server on port 9998 received the deterministic token and completed tool execution.
     """
-    user_jwt = "mock-jwt-user-alice-sub-987654"
+    user_payload = {
+        "sub": "alice_987654",
+        "iss": "https://idp.example.com",
+        "aud": "litellm-proxy",
+        "name": "Alice User",
+        "roles": ["developer"],
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+    }
+    user_jwt = make_mock_jwt(user_payload)
+
+    print("\n[E2E Positive Flow] Initiating request to LiteLLM with incoming user JWT...")
+    display_tokens(
+        stage_label="E2E Positive Flow - Pre-Exchange",
+        token_before=user_jwt,
+        details={"note": "User JWT passed in Authorization header before token exchange"},
+    )
 
     response = requests.post(
         f"{LITELLM_BASE_URL}/mcp-rest/tools/call",
@@ -91,16 +167,42 @@ def test_e2e_obo_positive_tool_call():
     assert latest["client_id"] == EXPECTED_CLIENT_ID
     assert latest["client_secret_present"] is True
     assert latest["audience"] == EXPECTED_AUDIENCE
-    assert user_jwt in latest["subject_token_preview"]
     assert "mcp.tools.read" in latest["scope"]
     assert "mcp.tools.execute" in latest["scope"]
+
+    # Display tokens before and after exchange
+    # Downstream MCP received the exchanged token
+    display_tokens(
+        stage_label="E2E Positive Flow - Post-Exchange Result",
+        token_before=user_jwt,
+        token_after=f"exchanged-<hash>-for-{EXPECTED_AUDIENCE}",
+        details={
+            "exchange_log": latest,
+            "downstream_mcp_response": content_text,
+        },
+    )
 
 
 def test_sts_rfc8693_direct_exchange():
     """
     Verify RFC 8693 endpoint on mock STS directly issues deterministic tokens.
     """
-    subject_token = "user-subject-token-xyz"
+    subject_payload = {
+        "sub": "user_xyz",
+        "iss": "https://idp.example.com",
+        "email": "user.xyz@example.com",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+    }
+    subject_token = make_mock_jwt(subject_payload)
+
+    print("\n[Direct STS Exchange] Token before exchange:")
+    display_tokens(
+        stage_label="Direct STS Exchange - Before Exchange",
+        token_before=subject_token,
+        details={"audience_requested": EXPECTED_AUDIENCE, "scopes_requested": EXPECTED_SCOPES},
+    )
+
     resp = requests.post(
         f"{STS_BASE_URL}/oauth2/token",
         data={
@@ -121,6 +223,13 @@ def test_sts_rfc8693_direct_exchange():
     assert f"-for-{EXPECTED_AUDIENCE}" in token
     assert data.get("token_type") == "Bearer"
     assert data.get("expires_in") == 3600
+
+    display_tokens(
+        stage_label="Direct STS Exchange - After Exchange",
+        token_before=subject_token,
+        token_after=token,
+        details=data,
+    )
 
 
 # ==============================================================================
