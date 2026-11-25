@@ -68,7 +68,7 @@ mcp_servers:
 
 ## Automated Testing & QA Test Suite
 
-An end-to-end integration and security test suite is provided in `tests_obo/test_obo_integration.py` to validate LiteLLM's RFC 8693 OBO flow alongside this mock STS server and downstream mock MCP server.
+An end-to-end integration and security test suite is provided in `test_rfc8693_token_exchange/test_rfc_8693_token_exchange.py` to validate LiteLLM's RFC 8693 OBO flow alongside this mock STS server and downstream mock MCP server.
 
 ### Test Coverage:
 1. **Lifecycle isolation**: `clean_exchange_logs` fixture calls `DELETE /log` before every test.
@@ -90,5 +90,5 @@ An end-to-end integration and security test suite is provided in `tests_obo/test
 2. Start the local environment services (Mock STS on `:9999`, Mock MCP on `:9998`, LiteLLM on `:4000`).
 3. Run the pytest suite:
    ```bash
-   pytest -v tests_obo/test_obo_integration.py
+   pytest -v test_rfc8693_token_exchange/test_rfc_8693_token_exchange.py
    ```
