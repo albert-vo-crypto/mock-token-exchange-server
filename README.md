@@ -65,3 +65,30 @@ mcp_servers:
     client_id: litellm-client
     client_secret: litellm-secret
 ```
+
+## Automated Testing & QA Test Suite
+
+An end-to-end integration and security test suite is provided in `tests_obo/test_obo_integration.py` to validate LiteLLM's RFC 8693 OBO flow alongside this mock STS server and downstream mock MCP server.
+
+### Test Coverage:
+1. **Lifecycle isolation**: `clean_exchange_logs` fixture calls `DELETE /log` before every test.
+2. **Positive E2E Tool Execution**: User request with mock JWT through LiteLLM proxy -> STS RFC 8693 exchange -> Downstream MCP tool call execution on port 9998.
+3. **Direct STS Verification**: Validates RFC 8693 conformance and deterministic token minting.
+4. **Security & Negative Vectors**:
+   - Missing subject token (LiteLLM fails closed with 401/403 and issues RFC 9728 challenge header).
+   - Expired subject token rejection.
+   - Audience mismatch rejection at STS and downstream MCP server.
+   - Scope escalation rejection at STS (`invalid_scope`).
+   - Invalid client credentials rejection (`invalid_client`).
+
+### Running the Tests:
+
+1. Install requirements:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Start the local environment services (Mock STS on `:9999`, Mock MCP on `:9998`, LiteLLM on `:4000`).
+3. Run the pytest suite:
+   ```bash
+   pytest -v tests_obo/test_obo_integration.py
+   ```

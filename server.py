@@ -11,12 +11,14 @@ Usage:
 The server listens on port 9999 and provides:
     POST /oauth2/token  - Token exchange endpoint (RFC 8693)
     GET  /health        - Health check
+    GET  /log           - View exchange log
+    DELETE /log         - Clear exchange log
 """
 
 import hashlib
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import uvicorn
 from fastapi import FastAPI, Form, Request
@@ -26,6 +28,12 @@ app = FastAPI(title="Mock Token Exchange Server (RFC 8693)")
 
 TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
 DEFAULT_EXPIRES_IN = 3600
+
+# Valid registered credentials & permissions
+REGISTERED_CLIENT_ID = "litellm-client"
+REGISTERED_CLIENT_SECRET = "litellm-secret"
+ALLOWED_AUDIENCES = {"api://my-mcp-server"}
+ALLOWED_SCOPES = {"mcp.tools.read", "mcp.tools.execute"}
 
 # In-memory log of exchanges for debugging
 exchange_log: list = []
@@ -48,7 +56,7 @@ async def token_exchange(
     The exchanged token encodes the audience and a hash of the subject_token so you
     can verify which user token was exchanged and for which target.
     """
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     # Log the exchange request
     log_entry = {
@@ -79,15 +87,51 @@ async def token_exchange(
         )
 
     # Validate client credentials
-    if not client_id or not client_secret:
-        print("ERROR: Missing client credentials")
+    if not client_id or not client_secret or client_id != REGISTERED_CLIENT_ID or client_secret != REGISTERED_CLIENT_SECRET:
+        print("ERROR: Invalid client credentials")
         return JSONResponse(
             status_code=401,
             content={
                 "error": "invalid_client",
-                "error_description": "client_id and client_secret are required",
+                "error_description": "client authentication failed",
             },
         )
+
+    # Validate subject token expiration / validity
+    if "expired" in subject_token.lower() or not subject_token.strip():
+        print("ERROR: Expired or invalid subject_token")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_grant",
+                "error_description": "The provided subject_token is expired or invalid",
+            },
+        )
+
+    # Validate audience
+    if audience and audience not in ALLOWED_AUDIENCES:
+        print(f"ERROR: Unauthorized audience {audience}")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_target",
+                "error_description": f"Requested audience '{audience}' is not registered or allowed",
+            },
+        )
+
+    # Validate scopes (Scope escalation check)
+    if scope:
+        requested_scopes = set(scope.split())
+        unauthorized_scopes = requested_scopes - ALLOWED_SCOPES
+        if unauthorized_scopes:
+            print(f"ERROR: Scope escalation attempt: {unauthorized_scopes}")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_scope",
+                    "error_description": f"Requested scopes {unauthorized_scopes} exceed client registration",
+                },
+            )
 
     # Generate a deterministic exchanged token so it's debuggable
     token_hash = hashlib.sha256(
